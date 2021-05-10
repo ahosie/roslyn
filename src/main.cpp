@@ -3,7 +3,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <string.h>
-#include "rotary_encoder.h"
 #include "main.h"
 
 #define ROTATE_CW_PULSE 2
@@ -26,9 +25,11 @@
 
 static Configuration config;
 static ApplicationState state;
+static SPISettings digipotSpiSettings;
 
 inline void initialise()
 {
+  digipotSpiSettings = SPISettings(8000000UL, MSBFIRST, SPI_MODE0);
   state.mode = ApplicationMode::initialising;
   state.speedPercent = 0.0;
 
@@ -42,16 +43,16 @@ inline void initialise()
 
 //static ApplicationMode _APP_CURRENT_MODE = ApplicationMode::initialising;
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
-
 /* Comment out above, uncomment this block to use hardware SPI
  */
 /*
 #define OLED_DC     6
 #define OLED_CS     7
 #define OLED_RESET  8
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RESET, OLED_CS);
 */
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RESET, OLED_CS);
+//Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+
 static uint16_t uintClockwiseTriggers = 0;
 static uint16_t uintCClockwiseTriggers = 0;
 
@@ -101,10 +102,7 @@ static Button lastDebouncedKey = Button::unknown;
 static Direction spinDirection = Direction::clockwise;
 
 static uint8_t triggerToggle = 0;
-
-
 static uint16_t encoderPulsesPerRevolution = 400;
-//static uint16_t encoderDivisor = 4; // Scale down the rate of pulses received from the rotary encoder by this figure
 
 static uint16_t pendingDigipotNextValue = 0;
 static uint16_t currentDigipotValue = 0;
@@ -120,9 +118,10 @@ static Button keystrokeBuffer[KEYSTROKE_BUFFER_SIZE] = {
   Button::none,
   Button::none
 };
-static int keyLogIndex = -1;
+static int keystrokeBufferIndex = -1;
 
-void digitalPotWrite(int value) {
+void digitalPotWrite(uint16_t value) {
+  SPI.beginTransaction(digipotSpiSettings);
   // take the SS pin low to select the chip:
   digitalWrite(DIGIPOT_CS, LOW);
 
@@ -132,6 +131,22 @@ void digitalPotWrite(int value) {
   
   // take the SS pin high to de-select the chip:
   digitalWrite(DIGIPOT_CS, HIGH);
+  SPI.endTransaction();
+}
+
+void digipotShutdown()
+{
+  SPI.beginTransaction(digipotSpiSettings);
+  // take the SS pin low to select the chip:
+  digitalWrite(DIGIPOT_CS, LOW);
+
+  //  send in the address and value via SPI:
+  SPI.transfer(0b00100011);
+  SPI.transfer(0b00000000);
+  
+  // take the SS pin high to de-select the chip:
+  digitalWrite(DIGIPOT_CS, HIGH);
+  SPI.endTransaction();
 }
 
 inline char buttonCharacterRepresentation(Button buttonState)
@@ -193,6 +208,7 @@ void IVR_KNOB_CW(){
 
 void setup() {
   initialise();
+  //digipotShutdown();
   Serial.begin(config.software.serialBaudRate);
   
   pinMode(ROTATE_CCW_PULSE, INPUT_PULLUP);
@@ -282,14 +298,15 @@ inline void updateButtonState()
 
     if(buttonState != Button::none)
     {
-      if(++keyLogIndex >= KEYSTROKE_BUFFER_SIZE)
+      if(++keystrokeBufferIndex >= KEYSTROKE_BUFFER_SIZE)
       {
-        keyLogIndex = 0;
+        keystrokeBufferIndex = 0;
       }
-      keystrokeBuffer[keyLogIndex] = buttonState;
+      keystrokeBuffer[keystrokeBufferIndex] = buttonState;
     }
 
     lastDebouncedKey = buttonState;
+    Serial.print(buttonCharacterRepresentation(buttonState));
   }
 }
 
@@ -352,9 +369,9 @@ inline void APP_SPEED_CONTROLLER()
   */
   //sprintf(strSpeed, "%X", (unsigned int)state.speedPercent);
   //sprintf(strSpeed, "%f", state.speedPercent);
-  sprintf(strSpeed, "%f", 100.0 * float(pendingDigipotNextValue) / float(config.hardware.digitPotMaxValue));
   //sprintf(strSpeed, "%i", (int)(state.speedPercent * 100.0));
-
+  sprintf(strSpeed, "%6.2f%%", 100.0 * (float(pendingDigipotNextValue) / float(config.hardware.digitPotMaxValue)));
+  //sprintf(strSpeed, "%5.2f%%", 3.14);
 
   display.write(strSpeed);
 
@@ -376,11 +393,11 @@ inline void APP_SPEED_CONTROLLER()
 
   display.setCursor(0, 48);
 
-  if(keyLogIndex >= 0)
+  if(keystrokeBufferIndex >= 0)
   {
     for(int relativeIndex = 0; relativeIndex < KEYSTROKE_BUFFER_SIZE; relativeIndex++)
     {
-      int absoluteIndex = keyLogIndex + relativeIndex + 1;
+      int absoluteIndex = keystrokeBufferIndex + relativeIndex + 1;
       display.write(buttonCharacterRepresentation(keystrokeBuffer[absoluteIndex % KEYSTROKE_BUFFER_SIZE]));
     }
 
@@ -393,6 +410,12 @@ inline void APP_SPEED_CONTROLLER()
   {
     display.write("[awaiting input]");
   }
+
+    currentDigipotValue = pendingDigipotNextValue;
+
+    // TODO perform a smooth step?
+    digitalPotWrite(currentDigipotValue);
+
 
   display.display();
 }
